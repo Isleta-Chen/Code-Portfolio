@@ -1,0 +1,454 @@
+---
+title: "Predicting Income from Demographics: Comparing Regularized Logistic Models"
+author: "Isleta Chen"
+date: "today"
+format: pdf
+toc: true
+execute:
+  cache: true
+---
+
+```{r}
+#| label: get-packages
+#| echo: false
+#| output: false
+#| warning: false
+packages <- c(
+  "tidyverse", "tidymodels", "textrecipes", "kknn",
+  "xgboost", "glmnet", "corrplot", "parallel", "future",
+  "textdata", "stm", "topicmodels", "tidytext", "reshape2",
+  "ldatuning", "tm", "glue"
+)
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+}
+```
+
+```{r}
+#| label: libraries-settings
+#| echo: false
+#| output: false
+#| warning: false
+for (pkg in packages) {
+  library(pkg, character.only = TRUE)
+}
+
+theme_set(theme_minimal())
+
+set.seed(123)
+
+all_cores <- parallel::detectCores()
+plan(multisession, workers = all_cores)
+```
+
+# Introduction
+
+This project uses U.S. Census data from 1994 to predict whether an individual's income exceeds \$50,000. Our main goal is to find the best regularization parameters for logistic regression determined by the model's accuracy score.
+
+# Data
+
+## Data Source
+
+Our data comes from the 1994 Census database ([Adult Income Database](https://archive.ics.uci.edu/dataset/2/adult)). To do our analysis, we manually added column headers to the train and test data through Excel. Next, we made the income column from the test and train data have the same values by removing the `.` from the income in the test data. Missing values are denoted as `?`. For our first set of tests, we will not filter these values, but we will later test if filtering these question marks will affect our model's accuracy.
+
+```{r}
+#| label: data_loading
+#| echo: true
+#| message: false
+#| warning: false
+
+adult_data <- read_csv("../data/adult_data.csv")
+adult_test <- read_csv("../data/adult_test.csv")
+```
+
+```{r}
+#| label: data-filtering
+adult_test <- adult_test |>
+  mutate(income = if_else(income == "<=50K.", "<=50K", ">50K"))
+
+adult_data_filtered <- adult_data |>
+  filter(workclass != "?", occupation != "?", `native-country` != "?")
+```
+
+# Analysis
+
+All models will tune penalty, use 10-fold cross-validation, and test 20 combinations when tuning.
+
+Below, we build three logistic regression models: Lasso, Ridge, and Elastic Net. Each model uses the tidymodels workflow with steps to handle novel factor levels, dummy variables, near-zero variance predictors, and normalization.
+
+## 1. Lasso Regression Model
+
+```{r}
+#| label: lasso-model-spec
+#| echo: false
+enet_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 1
+) |>
+  set_engine("glmnet")
+
+adult_recipe <- recipe(income ~ ., data = adult_data) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+adult_workflow <- workflow() |>
+  add_recipe(adult_recipe) |>
+  add_model(enet_model)
+
+adult_workflow
+```
+
+```{r}
+#| label: lasso-model-fold
+#| echo: false
+#| output: false
+enet_folds <- vfold_cv(adult_data, v = 10, strata = income)
+enet_folds
+
+enet_tune <- tune_grid(
+  adult_workflow,
+  resamples = enet_folds,
+  grid = 20
+)
+
+enet_tune
+```
+
+```{r}
+#| label: lasso-model-metric
+#| echo: false
+model_best <- select_best(enet_tune, metric = "accuracy")
+
+model_best
+
+final_enet_wf <- finalize_workflow(adult_workflow, model_best)
+
+final_enet_fit <- final_enet_wf |> fit(data = adult_data)
+
+adult_predict <- bind_cols(
+  predict(final_enet_fit, adult_test, type = "prob"),
+  predict(final_enet_fit, adult_test),
+  adult_test
+) |>
+  mutate(correct_unfiltered = (.pred_class == income))
+
+adult_predict |>
+  mutate(income = as_factor(income)) |>
+  conf_mat(truth = income, estimate = .pred_class)
+
+lasso_unfiltered_est <- adult_predict |>
+  mutate(income = as_factor(income)) |>
+  accuracy(truth = income, estimate = .pred_class) |>
+  pull(.estimate)
+```
+
+**Interpretation:** From our model, we get an accuracy for the lasso regression of `r lasso_unfiltered_est`.
+
+## 2. Ridge Regression Model
+
+```{r}
+#| label: ridge-model-spec
+#| echo: false
+enet_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = 0
+) |>
+  set_engine("glmnet")
+
+adult_recipe <- recipe(income ~ ., data = adult_data) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+
+adult_workflow <- workflow() |>
+  add_recipe(adult_recipe) |>
+  add_model(enet_model)
+
+adult_workflow
+```
+
+```{r}
+#| label: ridge-model-fold
+#| echo: false
+#| output: false
+enet_folds <- vfold_cv(adult_data, v = 10, strata = income)
+enet_folds
+
+enet_tune <- tune_grid(
+  adult_workflow,
+  resamples = enet_folds,
+  grid = 20
+)
+
+enet_tune
+```
+
+```{r}
+#| label: ridge-model-metric
+#| echo: false
+model_best <- select_best(enet_tune, metric = "accuracy")
+
+model_best
+
+final_enet_wf <- finalize_workflow(adult_workflow, model_best)
+
+final_enet_fit <- final_enet_wf |> fit(data = adult_data)
+
+adult_predict <- bind_cols(
+  predict(final_enet_fit, adult_test, type = "prob"),
+  predict(final_enet_fit, adult_test),
+  adult_test
+) |>
+  mutate(correct_unfiltered = (.pred_class == income))
+
+adult_predict |>
+  mutate(income = as_factor(income)) |>
+  conf_mat(truth = income, estimate = .pred_class)
+
+ridge_unfiltered_est <- adult_predict |>
+  mutate(income = as_factor(income)) |>
+  accuracy(truth = income, estimate = .pred_class) |>
+  pull(.estimate)
+```
+
+**Interpretation:** Our accuracy for the ridge regression is `r ridge_unfiltered_est`. Similar to lasso, but slightly lower.
+
+
+## 3. Elastic Net Regression Model
+
+```{r}
+#| label: enet-model-spec
+#| echo: false
+enet_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = tune()
+) |>
+  set_engine("glmnet")
+
+adult_recipe <- recipe(income ~ ., data = adult_data) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+adult_recipe
+
+adult_workflow <- workflow() |>
+  add_recipe(adult_recipe) |>
+  add_model(enet_model)
+
+adult_workflow
+```
+
+```{r}
+#| label: enet-model-fold
+#| echo: false
+#| output: false
+enet_folds <- vfold_cv(adult_data, v = 10, strata = income)
+enet_folds
+
+enet_tune <- tune_grid(
+  adult_workflow,
+  resamples = enet_folds,
+  grid = 20
+)
+
+enet_tune
+```
+
+```{r}
+#| label: enet-model-metric
+#| echo: false
+model_best <- select_best(enet_tune, metric = "accuracy")
+
+model_best
+
+final_enet_wf <- finalize_workflow(adult_workflow, model_best)
+
+final_enet_fit <- final_enet_wf |> fit(data = adult_data)
+
+adult_predict <- bind_cols(
+  predict(final_enet_fit, adult_test, type = "prob"),
+  predict(final_enet_fit, adult_test),
+  adult_test
+) |>
+  mutate(correct_unfiltered = (.pred_class == income))
+
+
+adult_predict |>
+  mutate(income = as_factor(income)) |>
+  conf_mat(truth = income, estimate = .pred_class)
+
+enet_unfiltered_est <- adult_predict |>
+  mutate(income = as_factor(income)) |>
+  accuracy(truth = income, estimate = .pred_class) |>
+  pull(.estimate)
+```
+
+**Interpretation:** Lastly, the accuracy for the elastic net regression is `r enet_unfiltered_est` which is the highest value so far. 
+
+## Models Comparison
+
+The three modeling pipelines all deliver similar overall test accuracy (approximately `0.83`). The comparison is visualized using a bar chart that shows the `.estimates` from each configuration.
+
+```{r}
+#| label: model-comparison
+#| echo: false
+
+accuracy <- tribble(
+  ~"name", ~"value",
+  "enet_unfiltered_est", enet_unfiltered_est,
+  "lasso_unfiltered_est", lasso_unfiltered_est,
+  "ridge_unfiltered_est", ridge_unfiltered_est
+)
+
+accuracy |>
+  ggplot() +
+  geom_col(aes(name, value)) +
+  coord_cartesian(ylim = c(.8, .85))
+```
+
+**Interpretation:** 
+Despite using different regularization strategies, the accuracy levels are very close, suggesting that the models have comparable predictive performance on this specific dataset.
+
+
+## Elastic Net Filtered
+Since we observed that elastic net had the highest accuracy, let's see if filtering the of `?` affects an elastic net model's accuracy.
+
+```{r}
+#| label: enet-f-model-spec
+#| echo: false
+model_filtered <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = tune()
+) |>
+  set_engine("glmnet")
+
+recipe_filtered <- recipe(income ~ ., data = adult_data_filtered) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+workflow_filtered <- workflow() |>
+  add_recipe(recipe_filtered) |>
+  add_model(model_filtered)
+
+workflow_filtered
+```
+
+```{r}
+#| label: enet-f-model-fold
+#| echo: false
+#| output: false
+folds_filtered <- vfold_cv(adult_data_filtered, v = 10, strata = income)
+
+tune_filtered <- tune_grid(
+  workflow_filtered,
+  resamples = folds_filtered,
+  grid = 20
+)
+
+tune_filtered
+```
+
+```{r}
+#| label: enet-f-model-metric
+#| echo: false
+#| output: false
+filter_best <- select_best(tune_filtered, metric = "accuracy")
+
+final_filtered_wf <- finalize_workflow(workflow_filtered, filter_best)
+
+final_filteredt_fit <- final_filtered_wf |> fit(data = adult_data_filtered)
+
+filtered_predict <- bind_cols(
+  predict(final_filteredt_fit, adult_test, type = "prob"),
+  predict(final_filteredt_fit, adult_test),
+  adult_test
+) |>
+  mutate(correct_filtered = (.pred_class == income))
+
+filtered_predict |>
+  mutate(income = as_factor(income)) |>
+  conf_mat(truth = income, estimate = .pred_class)
+
+enet_filtered_est <- filtered_predict |>
+  mutate(income = as_factor(income)) |>
+  accuracy(truth = income, estimate = .pred_class) |>
+  pull(.estimate)
+```
+**Interpretation: ** When we filter the data we get an accuracy of `r enet_filtered_est` which is very similar to our accuracy value for unfiltered. Between both models, there is a `r enet_unfiltered_est - enet_filtered_est` difference.
+
+
+## McNemar Test
+
+We selected the **Elastic Net Regression Model** for the McNemar test as it had the highest accuracy (`r enet_unfiltered_est`). The test compares predictions from filtered and unfiltered models to see if their classification differences are statistically significant.
+
+```{r}
+#| label: mcnemar-test
+#| echo: false
+model_compare <- tibble(
+  filtered_correct = filtered_predict$correct_filtered,
+  unfiltered_correct = adult_predict$correct_unfiltered
+)
+
+mcnemar_counts <- model_compare |>
+  count(filtered_correct, unfiltered_correct)
+
+mcnemar_counts
+
+b <- mcnemar_counts |>
+  filter(filtered_correct == TRUE, unfiltered_correct == FALSE) |>
+  pull(n)
+
+c <- mcnemar_counts |>
+  filter(filtered_correct == FALSE, unfiltered_correct == TRUE) |>
+  pull(n)
+
+mcnemar_result <- mcnemar.test(matrix(c(0, b, c, 0), nrow = 2))
+mcnemar_result
+
+mcnemar_result_p <- mcnemar_result$p.value
+```
+
+
+**Interpretation:** 
+
+The McNemar test returned a p-value of `r mcnemar_result_p`, which is slightly below the `0.05` threshold, suggesting that the difference in error distributions between the models is statistically significant.
+
+
+# Discussion (“So What?")
+
+In this project, we modeled adult income from the 1994 Census data using three types of logistic regression models. This analysis matters because understanding which regularization strategy better handles high-dimensional and potentially messy demographic data may guide how future policy or survey analyses are performed, especially when data cleanliness (missing values, etc.) is in question.
+
+## Final Takeaways
+
+- The Elastic Net model performed best, with slightly higher accuracy than Lasso or Ridge.
+- Filtering out missing values (`?`) did not dramatically change the accuracy but showed a small, statistically significant difference (McNemar test).
+- Regularization methods seem a bit too strong for this dataset, possibly due to the balanced and relatively large sample size.
+
+## Limitations
+
+- The data is from 1994 and may not generalize to current economic conditions.
+- Missing values (`?`) could reflect an unobserved pattern not found by simply filtering.
+
+## Conclusion
+
+Our exploration finds that using different regularization types leads to very similar model performance in predicting adult income (in this dataset). Small accuracy gains (in Elastic Net) might justify its added complexity if resources allow for parameter tuning. Data scientists should remain mindful of data quality and consider how filtering missing information affects outcomes.
+
+# Bibliography
+
+Becker, Barry and Ronny Kohavi. 1996. Adult. UCI Machine Learning Repository.\
+ [https://doi.org/10.24432/C5XW20](https://doi.org/10.24432/C5XW20).
