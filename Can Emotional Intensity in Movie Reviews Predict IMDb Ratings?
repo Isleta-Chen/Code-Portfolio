@@ -1,0 +1,275 @@
+---
+title: "Final Project: Can Emotional Intensity in Movie Reviews Predict IMDb Ratings?"
+author: "Isleta Chen"
+date: "today"
+format: 
+  pdf:
+    fig-pos: "H"
+toc: true
+---
+
+```{r}
+#| label: get-packages
+#| echo: false
+#| output: false
+#| warning: false
+packages <- c(
+  "tidyverse", "tidymodels", "textrecipes",
+  "glmnet", "parallel", "future",
+  "textdata", "tidytext", "glue"
+)
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+}
+```
+
+```{r}
+#| label: libraries-settings
+#| echo: false
+#| output: false
+#| warning: false
+for (pkg in packages) {
+  library(pkg, character.only = TRUE)
+}
+
+theme_set(theme_minimal())
+
+set.seed(123)
+
+all_cores <- parallel::detectCores()
+plan(multisession, workers = all_cores)
+```
+
+
+# Introduction
+
+User‑generated movie reviews combine subjective experiences with numerical scores, yet the link between the emotional charge of language and ratings remains underexplored. This project quantifies the positive and negative intensity of IMDb review text using the AFINN sentiment lexicon and examines how those emotion scores vary across ratings from 1 to 10. By visualizing these trends and building a penalized logistic regression model on reviews with extreme sentiment, we assess whether emotional intensity alone can predict high versus low ratings.
+
+
+# Data
+
+The dataset used in this analysis is obtained from [Large Movie Review Dataset](https://ai.stanford.edu/~amaas/data/sentiment/?utm_source=chatgpt.com) formatted into CSV for this project by Dr.Fredner. It contains several thousand records, each representing a movie review with the following key fields:
+
+- **text**: the full review comment (character string)
+- **rating**: an integer score from 1 (lowest) to 10 (highest)
+
+We then tokenize reviews, map each word to its AFINN score, sum these into an `emotion_score`, and label each review as `positive`, `negative`, or `neutral` for visualization and classification.
+
+
+```{r}
+#| label: data_loading
+#| echo: true
+#| message: false
+#| warning: false
+
+movie_data <- read_csv("../data/imdb_reviews.csv")
+```
+
+
+```{r}
+#| label: data-tokenizing
+#| echo: false
+
+# Tokenize each review into words for sentiment scoring
+movie_review <- movie_data |>
+  unnest_tokens(input = text, output = word)
+```
+
+```{r}
+#| label: sentiments_scoring
+#| echo: false
+
+# Score tokens using AFINN lexicon and compute an `emotion_score` per review
+sentiments <- get_sentiments("afinn")
+
+reviews_sentiment <- movie_review |>
+  inner_join(sentiments, by = "word") |>
+  group_by(review_id = row_number(), rating) |>
+  summarize(emotion_score = sum(value), .groups = "drop") |>
+  mutate(
+    emotion_type = case_when(
+      emotion_score > 0 ~ "positive",
+      emotion_score < 0 ~ "negative",
+      TRUE ~ "neutral"
+    )
+  )
+
+reviews_sentiment |>
+  slice_sample(n = 5)
+```
+
+
+
+# Analysis
+
+## 1. Positive emotion scores by rating
+```{r}
+#| label: positive_emotion
+#| echo: false
+
+# Plot average positive emotion score by rating
+positive_emotion <- reviews_sentiment |>
+  filter(emotion_type == "positive") |>
+  group_by(rating) |>
+  summarize(avg_score = mean(emotion_score), .groups = "drop") |>
+  ggplot(aes(x = factor(rating), y = avg_score)) +
+  geom_col() +
+  labs(
+    title = "Average Positive Emotion Intensity by Rating",
+    x = "Rating Score",
+    y = "Average Emotion Score"
+  ) +
+  coord_cartesian(ylim = c(2, 2.5))
+
+positive_emotion
+```
+
+**Interpretation:** Average positive intensity climbs steadily from ratings 1–4. Since ratings 5 and 6 do not appear in the review subset, the next available data point is at rating 7, which shows a jump in positive intensity between 4 and 7. Then continues rising through ratings 8–10, confirming that higher‑rated reviews consistently use stronger positive language.
+
+
+
+
+## 2. Negative emotion scores by rating
+
+```{r}
+#| label: negative_emotion
+#| echo: false
+
+# Plot average negative emotion score by rating
+negative_emotion <- reviews_sentiment |>
+  filter(emotion_type == "negative") |>
+  group_by(rating) |>
+  summarize(avg_score = mean(emotion_score), .groups = "drop") |>
+  ggplot(aes(x = factor(rating), y = avg_score)) +
+  geom_col() +
+  labs(
+    title = "Average Negative Emotion Intensity by Rating",
+    x = "Rating Score",
+    y = "Average Emotion Score"
+  ) +
+  coord_cartesian(ylim = c(-2.5, -1.5))
+
+negative_emotion
+```
+
+
+**Interpretation:** The average negative emotion score becomes less intense as ratings increase. Reviews with the lowest ratings (1–3) show the strongest negative intensity, while higher ratings exhibit gradually milder negative language.
+
+
+## 3. Data Filtering and Modeling
+
+### i. Data Filtering
+
+```{r}
+#| label: data-filtering
+#| echo: false
+
+# Focus on reviews with maximum absolute emotion scores
+extreme_reviews <- reviews_sentiment |>
+  filter(abs(emotion_score) == 5) |>
+  mutate(
+    rating_class = case_when(
+      rating >= 9 ~ "High",
+      rating <= 2 ~ "Low",
+      TRUE ~ NA_character_
+    ),
+    rating_class = fct_relevel(rating_class, "Low", "High")
+  ) |>
+  filter(!is.na(rating_class))
+
+extreme_reviews |>
+  slice_sample(n = 5)
+```
+
+**Interpretation:** By focusing only on reviews with the maximum emotional intensity, we capture the most emphatic opinions. In this subset, every review rated 9 (`high`) or above uses strongly positive language, while those rated 2 (`low`) or below use strongly negative language. 
+
+### ii. Data Modeling
+
+```{r}
+#| label: data_model
+#| echo: false
+
+# Train and evaluate a logistic regression model using glmnet with cross-validation, preprocessing, and test set performance assessment
+data_split <- initial_split(extreme_reviews, prop = 0.8, strata = rating_class)
+review_train <- training(data_split)
+review_test <- testing(data_split)
+
+review_model <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = tune()
+) |>
+  set_engine("glmnet")
+
+review_recipe <- recipe(rating_class ~ emotion_score + emotion_type, data = review_train) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+review_wf <- workflow() |>
+  add_recipe(review_recipe) |>
+  add_model(review_model)
+
+review_folds <- vfold_cv(review_train, v = 10, strata = rating_class)
+
+review_results <- tune_grid(
+  review_wf,
+  resamples = review_folds,
+  grid = 20
+)
+
+review_best <- select_best(review_results, metric = "accuracy")
+
+final_wf <- finalize_workflow(review_wf, review_best)
+
+final_fit <- final_wf |> fit(data = review_train)
+
+test_predictions <- bind_cols(
+  predict(final_fit, review_test, type = "prob"),
+  predict(final_fit, review_test),
+  review_test
+)
+
+
+test_conf_mat <- test_predictions |>
+  conf_mat(truth = rating_class, estimate = .pred_class)
+test_conf_mat
+
+
+test_accuracy <- test_predictions |>
+  accuracy(truth = rating_class, estimate = .pred_class) |>
+  pull(.estimate)
+```
+
+**Interpretation:** The logistic model achieved an accuracy of `r test_accuracy`, but its performance is pretty asymmetric. From the Confusion Matrix, we can see that the model is excellent at picking out strongly positive, high‑rated reviews from their emotion features, but it struggles to recognize strongly negative ones. 
+
+
+
+
+# Discussion
+
+## “So What?"
+
+In this project, we want to know whether the words people use tell us as much as the rating itself. These findings suggest that mining emotional intensity in real time could help businesses and platforms to prioritize customer feedback by automatically displaying the most outstanding compliments or urgent complaints, or monitor brand health through aggregated sentiment trends, spotting shifts in user mood before they translate into major drops in ratings.
+
+
+## Limitations
+
+- **Lexicon approach**: AFINN misses negation, sarcasm, and multi‑word nuances.
+- **Class imbalance**: Many more high‑rated than low‑rated reviews may skew results.
+- **Length bias**: Longer reviews naturally accumulate higher scores, biasing intensity measures.
+
+
+## Conclusion
+
+This project demonstrates that the emotional intensity in reviews is a powerful predictor of user satisfaction. Strongly positive wording maps closely to high ratings, while strongly negative wording is a weaker but still valuable indicator of low satisfaction.
+
+# Bibliography
+
+Maas, A. L., Daly, R. E., Pham, P. T., Huang, D., Ng, A. Y., & Potts, C. (2011, June). *Learning word vectors for sentiment analysis*. In Proceedings of the 49th Annual Meeting of the Association for Computational Linguistics: Human Language Technologies (pp. 142–150). Association for Computational Linguistics. .\
+ [http://www.aclweb.org/anthology/P11-1015](http://www.aclweb.org/anthology/P11-1015).
+
