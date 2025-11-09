@@ -1,0 +1,253 @@
+---
+title: "Nut-Free vs. Nut-Containing Foods Price Analysis"
+author: "Isleta Chen"
+date: "2025-02-17"
+institute: "University of Richmond"
+format:
+  pdf:
+    embed-resources: true
+editor: source
+toc: true
+---
+
+```{r}
+#| label: libraries
+#| echo: true
+#| warning: false
+
+library(tidyverse)
+library(tidytext)
+library(scales)
+library(dplyr)
+theme_set(theme_minimal())
+```
+
+## Introduction
+
+Food allergies, particularly life-threatening nut allergies, affect more than 33 million Americans ([Food Allergy Research & Education, 2024](https://www.foodallergy.org/sites/default/files/2024-07/FARE%20Food%20Allergy%20Facts%20and%20Statistics_April2024.pdf)), making safe, affordable nut-free products a critical need. However, allergen-free foods are often more expensive due to specialized manufacturing processes, strict safety certifications, and lower economies of scale. These increased costs can put a strain on budgets and increase food insecurity for households with allergies. This project examines whether nut-free products are systematically priced higher than food containing nuts by analyzing data from three major U.S. grocery retailers—**Walmart**, **Target**, and **Whole Foods**. By quantifying price disparities and identifying cost-effective alternatives, we hope to help consumers navigate economic and safety choices while advocating for solutions to improve affordability.
+
+## Data Dictionary and Data Collection
+
+The dataset was created with the purpose of exploring and characterizing processed foods by analyzing ingredients and nutrition facts of foods from **Walmart**, **Target**, and **Whole Foods**. The dataset, `grocery`, we are using for this project can be accessed [here](https://github.com/Barabasi-Lab/GroceryDB).
+
+We used `read_csv` to read the downloaded dataset.
+
+```{r}
+#| echo: true
+#| warning: false
+#| results: false
+
+grocery <- read_csv("../data/GroceryDB_foods.csv")
+
+```
+
+### Variables
+
+The columns that we will be examining are:
+
+| Column Name                  | Description           | Unit |
+|------------------------------|-----------------------|------|
+| `has10_nuts`                 | If food contains nuts | \-   |
+| `price`                      | Food Price            | USD  |
+| `harmonized single category` | Category              | \-   |
+
+### Data Analysis and Visualization
+
+To conduct this analysis, we first identified nut-containing products using the dataset `has10_nuts` and `is_Nuts_Converted_100g` columns, creating a binary `contains_nuts` variable using the function `mutate()` and an `if_else` statement to set the values depending on if the conditions are true or false. Then, we filtered missing price data to ensure accuracy using the `filter()` function and filtering out price values that contained `NA`. We then used `count()` to count the number of foods nut-free and nut-containing foods and stored them in an object called `nut_counts`.
+
+```{r}
+
+grocery <- grocery |>
+  mutate(contains_nuts = if_else(
+    has10_nuts == 1 | is_Nuts_Converted_100g == 1, 
+    1, 
+    0
+  ))
+
+grocery <- grocery |>
+  filter(!is.na(price))
+
+nut_counts <- grocery |>
+  count(contains_nuts)
+nut_counts
+```
+
+## Average Prices for Food With Nuts and Without Nuts
+
+The average prices for nut-free foods and nut-containing were calculated using `summarize()` and removing values that are `NA`. These values are stored in an object `avg_prices`. Then, the code extracts and rounds the average prices for products with and without nuts using the tidyverse pipeline. We select rows where contains_nuts is 1, then use `pull` to extract the `average_price` column as a vector, and round it to two decimal places, storing the result in `nut_containing_product`. And we do the same thing for nut-free products, storing the rounded value in   `nut_free_product`.
+
+```{r}
+avg_prices <- grocery |>
+  group_by(contains_nuts) |>
+  summarize(average_price = mean(price, na.rm = TRUE), .groups = "drop")
+
+nut_containing_product <- avg_prices |>
+  filter(contains_nuts == 1) |>
+  pull(average_price)|>
+  round(digits = 2)
+
+nut_free_product <- avg_prices |>
+  filter(contains_nuts == 0) |>
+  pull(average_price)|>
+  round(digits = 2)
+
+avg_prices
+```
+
+We can see that the nut-free products have an average price of **\$`{r} nut_free_product`**, which is **higher** than nut-containing products that have an average price of **\$`{r} nut_containing_product`**.
+
+### Visualize Price Differences Between Food With Nuts and Without Nuts
+
+To illustrate these findings, we made a scatter plot. We converted the `contains_nuts` variable into a categorical variable using `as_factor()`. A new variable, `product_category`, was made so that we could color the categories and label them as `Nut-Containing Products` or `Nut-Free` rather than `0` or `1`. Using these new variables, we then plotted them using `ggplot()`, `aes()`, and `geom_jitter()`. The `product_category` was plotted versus the price so that we could generate a graph that displays the price differences between nut-free and nut-containing products.
+
+```{r}
+#| label: fig-price-difference
+#| fig-cap: Plot showing the price comparison of Nut-Free vs. Nut-Containing Products in `grocery`
+
+grocery |>
+  mutate(
+    contains_nuts = as_factor(contains_nuts),
+    product_category = if_else(
+      contains_nuts == 1,
+      "Nut-Containing Products", 
+      "Nut-Free"
+    )) |>
+  ggplot(aes(x = product_category, y = price, color = product_category)) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(
+    title = "Price Comparison: Nut-Free vs. Nut-Containing Products",
+    x = "Product Category",
+    y = "Price ($)",
+    color = "Product Category"
+  ) +
+  scale_color_viridis_d() +
+  theme_minimal()
+
+```
+
+This visualization showed the pricing gap between nut-free and nut-containing products, using jitter points to avoid overlap. The color scheme (`viridis_d()`) enhances contrast, making it easier to distinguish nut-free vs. nut-containing products.
+
+To analyze pricing trends, we applied linear regression by first using the `lm()` function and storing the information under a new object `model`:
+
+```{r}
+#| label: fig-price-model
+#| fig-cap: Linear regression analysis of nut-free products  
+
+model <- lm(price ~ contains_nuts, data = grocery)
+summary(model)
+```
+
+This code uses a linear regression model (`lm()`) to analyze the relationship between food prices (`price`) and whether a product contains nuts (`contains_nuts`). The results show that there is a significantly higher price for nut-free products (`p < 0.001`). Nut-free products cost `$0.61`(`coefficient:` `-0.61114`) more on average, however, the practical effect is minimal. Also, the small R² value (`0.28%`) indicates that factors beyond nut content (*brand, product type, or stores*) drive most price variation, emphasizing the need for multivariate analysis to identify stronger predictors.
+
+## Average Prices for Nut-Free and Nut-Containing Products in Each Store
+
+The average prices of the nut-free and nut-containing products were calculated for each store using `group_by()` and `summarize()`. The `NA` values were removed. Then, for each store, we select nut-free products, use `pull` to extract the `average_price` column as a vector, and round the value to two decimal places, storing them in `wholefood`, `target`, and `walmart`, respectively. 
+
+```{r}
+avg_prices_store <- grocery |>
+  group_by(store, contains_nuts) |>
+  summarize(average_price = mean(price, na.rm = TRUE), .groups = "drop")
+
+wholefood <- avg_prices_store |>
+  group_by(store, contains_nuts) |>
+  filter(store == "WholeFoods", contains_nuts == 0) |>
+  pull(average_price)|>
+  round(digits = 2)
+
+target <- avg_prices_store |>
+  group_by(store, contains_nuts) |>
+  filter(store == "Target", contains_nuts == 0) |>
+  pull(average_price)|>
+  round(digits = 2)
+
+walmart <- avg_prices_store |>
+  group_by(store, contains_nuts) |>
+  filter(store == "Walmart", contains_nuts == 0) |>
+  pull(average_price)|>
+  round(digits = 2)
+
+avg_prices_store
+
+```
+
+By comparing the prices of nut-free products and nut-containing products in each store, the results showed that **Whole Foods** had the highest price, which is **\$`{r} wholefood`**, while **Walmart** had the lowest price, which is **\$`{r} walmart`**, making **Walmart** a better option for budget-conscious nut-free consumers.
+
+### Visualize Price Differences Between Stores
+
+To illustrate these findings, we used a bar chart to visualize the average price of nut-free and nut-containing products across three major grocery stores. We converted the `contains_nuts` variable into a categorical variable using `as_factor()`. A new variable, `product_category`, was made so that we could color the categories and label them as *Nut-Containing Products* or *Nut-Free* rather than 0 or 1. Using `ggplot()`, `aes()`, and `geom_col()`, we were able to plot the average prices for nut-free and nut-containing products for each store and compare them. We used `position = “dodge”` so that the bars for nut-free and nut-containing products would be next to each other for the same store. This allows us to compare the prices within and between **Target**, **Walmart**, and **Whole Foods**.
+
+```{r}
+#| label: fig-price-col
+#| fig-cap: Comparison of Average Nut-Free vs. Nut-Containing Prices Across Target, Walmart, and Wholefoods
+avg_prices_store |>
+  mutate(
+    contains_nuts = as_factor(contains_nuts),
+    product_category = if_else(
+      contains_nuts == 1,
+      "Nut-Containing Products", 
+      "Nut-Free"
+    )) |>
+  ggplot(aes(x = store, y = average_price, fill = product_category)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Nut-Free vs. Nut-Containing Prices Across Stores",
+    x = "Store",
+    y = "Average Price ($)",
+    fill = "Product Category"
+  ) +
+  scale_fill_viridis_d() +
+  theme_minimal()
+
+```
+
+The bar chart shows that different stores affect nut-free products' affordability. Bars are grouped by store, with nut-free and nut-containing prices side-by-side for comparison. It highlights which retailers charge more for nut-free products. Consumers with nut allergies can save money by choosing **Walmart** or **Target** instead of **Whole Foods**.
+
+## Recommendations for food
+
+To help consumers with nut allergies, we identified the most affordable nut-free snacks, dairy alternatives, and protein sources:
+
+```{r}
+grocery <- grocery |> 
+  rename(category = `harmonized single category`)
+
+nut_free_foods <- grocery |> 
+  filter(contains_nuts == 0)
+
+top_nutfree_snacks <- nut_free_foods |>
+  filter(str_detect(category, "snack|granola|bars")) |>
+  arrange(price) |>
+  mutate(category_recommend = "top_nutfree_snacks") |>
+  select(category_recommend, name, price, store) |>
+  slice_head(n = 5)
+
+top_nutfree_dairy <- nut_free_foods |>
+  filter(str_detect(category, "milk|yogurt|cheese")) |>
+  arrange(price) |>
+  mutate(category_recommend = "top_nutfree_dairy") |>
+  select(category_recommend, name, price, store) |>
+  slice_head(n = 5)
+
+top_nutfree_protein <- nut_free_foods |>
+  filter(str_detect(category, "protein|meat|fish")) |>
+  arrange(price) |>
+  mutate(category_recommend = "top_nutfree_protein") |>
+  select(category_recommend, name, price, store) |>
+  slice_head(n = 5)
+
+top_nutfree_snacks
+top_nutfree_dairy
+top_nutfree_protein
+
+```
+
+To identify affordable nut-free products, the script filters the dataset for snacks, dairy alternatives, and protein sources, then sorts by price to select the five cheapest options in each category using the functions `filter()`, `arrange()`, `select()`, and `slice_head()`. **Snacks** include products like `granola` and `bars`, while **dairy** covers `milk`, `yogurt`, and `cheese`, and **protein sources** include `meat` and `fish`. The final list provides the `name`, `price`, and `store`, helping consumers find budget-friendly nut-free choices. These budget-friendly, nut-free products show that affordable alternatives exist, particularly at **Walmart** and **Target**.
+
+## Conclusion & “So what?”
+
+Studying potential trends in food prices of nut-free and foods containing nuts helps to highlight previously overlooked issues that may impact food choices and spending habits in people with nut allergies. By demonstrating relatively higher prices of nut-free snacks than nut-containing snacks, informed consumers with a history of food allergies, specifically nut allergies, may choose other less costly snacks/foods. The less costly snacks/foods without nuts or nut oil might make more sense from a *personal health*, *safety*, and *economic perspective*. Further, an informed and educated consumer who still wishes to eat nut-free products can review a cost comparison and choose where to shop based on lower prices. Sharing this information with other consumers can influence others in their snack choices and lower-price grocery locations. This helps shoppers save money and time and learn about additional recommendations for snacks/foods that match their dietary needs and budget. Finally, notifying the companies supplying these products of differences in costs of these nut-free products might encourage them to have more competitive pricing and lower their prices to maintain their consumer base.
+
+Our data and analysis reveal that nut-free products tend to be more expensive than nut-containing products. The average price for nut-free products is **\$5.21**, compared to **\$4.6** for nut-containing products. Among major retailers, **Whole Foods** has the highest prices for both nut-free and nut-containing products, while **Walmart** offers the lowest prices, and **Target** falls in the middle. This means that consumers with nut allergies may face higher grocery costs, especially if **Whole Foods** or **Target** are their only nearby options. Grocery stores could benefit from highlighting affordable nut-free options to help customers with allergies make cost-effective choices.
+
+This result provides key takeaways for consumers, retailers, and policymakers. **Consumers** should prioritize **Walmart** for budget-friendly nut-free snacks, proteins, and dairy alternatives due to its lower prices. If inaccessible, **Target** offers competitive pricing for dairy alternatives. Always compare unit prices (*price per ounce*) and opt for store brands like Great Value (Walmart) or Good & Gather (Target). **Retailers** like **Walmart** and **Target** can expand affordable store-brand nut-free lines (*eg. cereals, baking mixes*) using cost-efficient supply chains. **Whole Foods** can introduce budget-friendly products to attract price-sensitive shoppers. All retailers should adopt clear labeling (*eg. “Certified Nut-Free” signs*) and offer bulk discounts to reduce per-unit costs. **Policymakers** can subsidize allergy-friendly foods by offering tax incentives to manufacturers that produce affordable nut-free products. Collectively, these steps can improve affordability while ensuring safe, accessible options for allergy-conscious consumers.
+
+Nut-free foods tend to be more expensive due to specialized production processes, supply chain limitations, and strict safety regulations. Manufacturers must follow stringent allergen controls to prevent contamination, which requires dedicated equipment, facilities, and thorough testing. All these processes increase costs. Additionally, nut-free alternatives often rely on substitutes like sunflower butter or seed-based proteins, which can be more expensive than traditional nut ingredients. Limited availability and higher demand for allergy-safe products further contribute to their premium pricing in the market.
